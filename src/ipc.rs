@@ -274,6 +274,12 @@ pub enum Data {
     ClearTrustedDevices,
     #[cfg(all(target_os = "windows", feature = "flutter"))]
     PrinterData(Vec<u8>),
+    InstallOption(Option<(String, String)>),
+    #[cfg(all(
+        feature = "flutter",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    ControllingSessionCount(usize),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -493,7 +499,7 @@ async fn handle(data: Data, stream: &mut Connection) {
                         None
                     };
                 } else if name == "hide_cm" {
-                    value = if crate::hbbs_http::sync::is_pro() {
+                    value = if crate::hbbs_http::sync::is_pro() || crate::common::is_custom_client() {
                         Some(hbb_common::password_security::hide_cm().to_string())
                     } else {
                         None
@@ -598,6 +604,13 @@ async fn handle(data: Data, stream: &mut Connection) {
                     .await
             );
         }
+        #[cfg(all(
+            feature = "flutter",
+            not(any(target_os = "android", target_os = "ios"))
+        ))]
+        Data::ControllingSessionCount(count) => {
+            crate::updater::update_controlling_session_count(count);
+        }
         #[cfg(feature = "hwcodec")]
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Data::CheckHwcodec => {
@@ -662,6 +675,23 @@ async fn handle(data: Data, stream: &mut Connection) {
         Data::ClearTrustedDevices => {
             Config::clear_trusted_devices();
         }
+        Data::InstallOption(opt) => match opt {
+            Some((_k, _v)) => {
+                #[cfg(target_os = "windows")]
+                if let Err(e) = crate::platform::windows::update_install_option(&_k, &_v) {
+                    log::error!(
+                        "Failed to update install option \"{}\" to \"{}\", error: {}",
+                        &_k,
+                        &_v,
+                        e
+                    );
+                }
+            }
+            None => {
+                // `None` is usually used to get values.
+                // This branch is left blank for unification and further use.
+            }
+        },
         _ => {}
     }
 }
@@ -1262,6 +1292,17 @@ pub async fn clear_wayland_screencast_restore_token(key: String) -> ResultType<b
     return Ok(false);
 }
 
+#[cfg(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+#[tokio::main(flavor = "current_thread")]
+pub async fn update_controlling_session_count(count: usize) -> ResultType<()> {
+    let mut c = connect(1000, "").await?;
+    c.send(&Data::ControllingSessionCount(count)).await?;
+    Ok(())
+}
+
 async fn handle_wayland_screencast_restore_token(
     key: String,
     value: String,
@@ -1275,6 +1316,16 @@ async fn handle_wayland_screencast_restore_token(
         return Ok(Some(v));
     }
     return Ok(None);
+}
+
+#[tokio::main(flavor = "current_thread")]
+pub async fn set_install_option(k: String, v: String) -> ResultType<()> {
+    if let Ok(mut c) = connect(1000, "").await {
+        c.send(&&Data::InstallOption(Some((k, v)))).await?;
+        // do not put below before connect, because we need to check should_exit
+        c.next_timeout(1000).await.ok();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
